@@ -1,0 +1,89 @@
+name: Packer AMI Build
+run-name: ${{ github.actor }} is Packer Build
+on:
+  pull_request:
+    types:
+      - closed
+jobs:
+  packer-build:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v2
+
+      # use Java17
+      - name: Set up JDK 17
+        uses: actions/setup-java@v1
+        with:
+          java-version: 17
+          cache: maven
+
+      # use Maven
+      - name: Build Maven
+        run: mvn -B package -DskipTests --file pom.xml
+
+      - name: Move file from target/
+        run: mv target/webapp-0.0.1-SNAPSHOT.jar .
+
+      - name: set up dev AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ca-central-1
+
+       #Build Packer
+      - name: build AMI with packer
+        run: packer build ami.pkr.hcl
+
+      - name: Install AWS CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y awscli
+
+      - name: Get latest AMI ID
+        run: |
+          ami_id=$(aws ec2 describe-images --owners self --query 'reverse(sort_by(Images, &CreationDate))[:1].ImageId' --output text)
+          echo "ami_id=$ami_id" >> $GITHUB_ENV
+          echo "AMI ID: ${{ env.ami_id }}"
+        id: get_ami_id
+
+      - name: set up demo AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_DEMO_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_DEMO_SECRET_ACCESS_KEY }}
+          aws-region: ca-central-1
+
+      - name: Get launch template version
+        run: |
+          version=$(aws ec2 describe-launch-template-versions --launch-template-name launch-template-6225 \
+          --query 'reverse(sort_by(LaunchTemplateVersions, &CreateTime)) | [0].VersionNumber' \
+          --output text)
+          echo "version=$version" >> $GITHUB_ENV
+          echo "version: ${{ env.version }}"
+        id: get_launch_template_version
+
+      - name: create launch template version
+        run: aws ec2 create-launch-template-version --launch-template-name launch-template-6225 --source-version ${{ env.version }} --launch-template-data '{"ImageId":"${{ env.ami_id }}"}'
+
+      - name: Get latest launch template version
+        run: |
+          latest_version=$(aws ec2 describe-launch-template-versions --launch-template-name launch-template-6225 \
+          --query 'reverse(sort_by(LaunchTemplateVersions, &CreateTime)) | [0].VersionNumber' \
+          --output text)
+          echo "latest_version=$latest_version" >> $GITHUB_ENV
+          echo "latest_version: ${{ env.latest_version }}"
+        id: get_launch_template_version_latest
+
+      - name: set default version
+        run: aws ec2 modify-launch-template --launch-template-name launch-template-6225 --default-version ${{ env.latest_version }}
+
+      - name: update auto scaling group
+        run: aws autoscaling update-auto-scaling-group --auto-scaling-group-name csye6225-asg-spring2023 --launch-template LaunchTemplateName=launch-template-6225,Version=${{ env.latest_version }}
+
+      - name: refresh instance
+        run: aws autoscaling start-instance-refresh --auto-scaling-group-name csye6225-asg-spring2023
+

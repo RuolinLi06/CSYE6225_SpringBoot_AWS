@@ -1,0 +1,8 @@
+[Unit]
+Description=webapp
+Restart=always
+[Service]
+Type=simple
+ExecStart=/opt/jdk-17/bin/java -jar /etc/systemd/system/webapp-0.0.1-SNAPSHOT.jar
+[Install]
+WantedBy=multi-user.target
